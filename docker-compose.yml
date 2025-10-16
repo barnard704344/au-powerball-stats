@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: au-powerball-stats
+    env_file:
+      - .env
+    environment:
+      - TZ=${TZ:-Australia/Adelaide}
+      - FLASK_HOST=${FLASK_HOST:-0.0.0.0}
+      - FLASK_PORT=${FLASK_PORT:-8080}
+      - UPDATE_CRON=${UPDATE_CRON:-*/15 * * * *}
+      - YEARS_START=${YEARS_START:-2018}
+      - DB_PATH=${DB_PATH:-/data/powerball.sqlite}
+    ports:
+      - "${FLASK_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+    restart: unless-stopped

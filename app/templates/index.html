@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>AU Powerball – Live Stats (7/35 + PB 1–20)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="box">
+    <h1>Australian Powerball – Real-Time Stats</h1>
+    <p class="small">Scraped from a public results archive; updates on schedule or manual refresh.</p>
+    <p class="small">
+      Window:
+      <a href="/?window=" class="btn">All</a>
+      <a href="/?window=50" class="btn">Last 50</a>
+      <a href="/?window=75" class="btn">Last 75</a>
+      <a href="/?window=100" class="btn">Last 100</a>
+    </p>
+    <form method="post" action="/refresh" onsubmit="return doRefresh(event)">
+      <button class="btn">Manual refresh</button>
+      <span id="refresh-status"></span>
+    </form>
+  </header>
+
+  <main class="grid">
+    <section class="box">
+      <h2>Main numbers frequency (1–35)<span id="sample-size"></span></h2>
+      <div id="main-chart" class="bars"></div>
+    </section>
+
+    <section class="box">
+      <h2>Powerball frequency (1–20)</h2>
+      <div id="pb-chart" class="bars"></div>
+    </section>
+
+    <section class="box">
+      <h2>Recent draws</h2>
+      <table class="draws">
+        <thead><tr><th>No.</th><th>Date</th><th>Main (7)</th><th>PB</th></tr></thead>
+        <tbody>
+        {% for d in draws %}
+          <tr>
+            <td>{{ d.draw_no }}</td>
+            <td>{{ d.draw_date }}</td>
+            <td class="nums">
+              {% for n in d.nums %}
+                <span class="ball">{{ "%02d"|format(n) }}</span>
+              {% endfor %}
+            </td>
+            <td><span class="ball pb">{{ "%02d"|format(d.powerball) }}</span></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="box">
+      <h2>Notes</h2>
+      <ul>
+        <li>Format: 7 from 1–35 + PB 1–20 (since 2018).</li>
+        <li>Frequencies are descriptive; they don’t predict future draws.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="box small">
+    <p>© AU Powerball Stats</p>
+  </footer>
+
+<script>
+async function fetchJSON(url){ const r=await fetch(url); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+function maxVal(obj){ return Math.max(...Object.values(obj)); }
+function renderBars(el, counts, maxValue, labelPrefix=""){
+  el.innerHTML = "";
+  const keys = Object.keys(counts).map(Number).sort((a,b)=>a-b);
+  for (const k of keys) {
+    const v = counts[k] || 0;
+    const pct = maxValue ? (v / maxValue) * 100 : 0;
+    const row = document.createElement("div");
+    row.className = "bar-row";
+    row.innerHTML = `
+      <span class="label">${labelPrefix}${k.toString().padStart(2,"0")}</span>
+      <span class="bar"><span class="fill" style="width:${pct}%"></span></span>
+      <span class="value">${v}</span>
+    `;
+    el.appendChild(row);
+  }
+}
+async function load(){
+  const params = new URLSearchParams(location.search);
+  const windowParam = params.get("window");
+  const freqs = await fetchJSON("/api/frequencies" + (windowParam ? ("?window="+windowParam) : ""));
+  document.getElementById("sample-size").textContent = ` · sample size: ${freqs.sample_size} draws`;
+  renderBars(document.getElementById("main-chart"), freqs.main, maxVal(freqs.main));
+  renderBars(document.getElementById("pb-chart"), freqs.powerball, maxVal(freqs.powerball), "PB ");
+}
+async function doRefresh(ev){
+  ev.preventDefault();
+  const status = document.getElementById("refresh-status");
+  status.textContent = " syncing…";
+  try { const r = await fetch("/refresh", {method:"POST"}); const j = await r.json();
+    status.textContent = (j.status==="ok") ? ` upserted ${j.upserted} rows` : " error: "+(j.error||"unknown");
+    await load();
+  } catch(e){ status.textContent = " error: " + e.message; }
+  return false;
+}
+window.addEventListener("DOMContentLoaded", load);
+</script>
+</body>
+</html>
