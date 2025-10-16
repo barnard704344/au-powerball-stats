@@ -1,12 +1,8 @@
-import os
-import sys
-import threading
+import os, sys, threading
 from flask import Flask, jsonify, render_template, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
 
-# --- Ensure the current directory is on sys.path so local modules import cleanly ---
-# (This avoids 'ModuleNotFoundError: scraper' when Gunicorn loads app:app)
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
@@ -15,15 +11,11 @@ from db import init_db, get_draws, get_frequencies
 from scraper import sync_all
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
-
-# Initialize DB schema
 init_db()
 
-# Scheduling / timezone
 TZ = os.environ.get("TZ", "Australia/Adelaide")
 LOCAL_TZ = timezone(TZ)
 UPDATE_CRON = os.environ.get("UPDATE_CRON", "*/15 * * * *")
-
 scheduler = BackgroundScheduler(timezone=LOCAL_TZ)
 
 def job_sync():
@@ -49,19 +41,13 @@ def initial_sync_async():
             app.logger.exception(f"Initial sync failed: {e}")
     threading.Thread(target=_run, daemon=True).start()
 
-# Kick off initial sync and schedule
 initial_sync_async()
 schedule_job()
 
-# ----------------------- Routes -----------------------
 @app.get("/")
 def index():
-    """
-    Optional query params:
-      - window: int (e.g., 75) to limit frequency sample to latest N draws
-    """
     window = request.args.get("window", type=int)
-    draws = get_draws(limit=200)  # recent draws table
+    draws = get_draws(limit=200)
     freqs = get_frequencies(window=window)
     return render_template("index.html", draws=draws, freqs=freqs, window=window)
 
