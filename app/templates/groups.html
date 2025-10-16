@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Powerball — Common Groups</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+      h1, h2 { margin: 0.2rem 0 0.6rem; }
+      .meta { color: #555; margin-bottom: 1rem; }
+      table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+      th, td { border: 1px solid #ddd; padding: 0.5rem 0.6rem; text-align: left; }
+      th { background: #f6f6f6; }
+      code { background: #f2f2f2; padding: 0 0.25rem; border-radius: 4px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+      .card { border: 1px solid #e5e5e5; border-radius: 10px; padding: 1rem; }
+      .pb-table td:first-child, .pb-table th:first-child { width: 80px; }
+      .toolbar a { margin-right: 0.6rem; text-decoration: none; color: #0b63e5; }
+      .toolbar a:hover { text-decoration: underline; }
+      .small { font-size: 0.92rem; color: #666; }
+    </style>
+  </head>
+  <body>
+    <h1>Most Common Groups (Powerball)</h1>
+    <div class="meta">
+      Window: <strong>{{ stats.window }}</strong> draws
+      &middot; k = <strong>{{ stats.ks|join(', ') }}</strong>
+      &middot; Top-N per section: <strong>{{ stats.limit }}</strong>
+      &middot; Sample size (valid draws): <strong>{{ stats.sample_size }}</strong>
+    </div>
+
+    <div class="toolbar small">
+      <a href="/?window={{ stats.window }}">← Back to Recent</a>
+      <a href="/groups?window=50">Last 50</a>
+      <a href="/groups?window=100">Last 100</a>
+      <a href="/groups?window=200">Last 200</a>
+      &middot;
+      <a href="/groups?window={{ stats.window }}&limit=10">Top 10</a>
+      <a href="/groups?window={{ stats.window }}&limit=20">Top 20</a>
+      <a href="/groups?window={{ stats.window }}&limit=50">Top 50</a>
+      &middot;
+      <a href="/groups?window={{ stats.window }}&limit={{ stats.limit }}&ks=2">Pairs only</a>
+      <a href="/groups?window={{ stats.window }}&limit={{ stats.limit }}&ks=3">Triples only</a>
+      <a href="/groups?window={{ stats.window }}&limit={{ stats.limit }}&ks=4">Quads only</a>
+    </div>
+
+    <div class="grid">
+      {% for k in stats.ks %}
+      <div class="card">
+        <h2>Top {{ k }}-number groups</h2>
+        {% set rows = stats.group_top[k] if stats.group_top.get(k) else [] %}
+        {% if rows %}
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Group</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>
+                {% for n in row.combo %}
+                  <code>{{ "%02d"|format(n) }}</code>{% if not loop.last %} {% endif %}
+                {% endfor %}
+              </td>
+              <td>{{ row.count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <div class="small">No data.</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+
+      <div class="card">
+        <h2>Most common Powerball numbers</h2>
+        {% if stats.powerball_top %}
+        <table class="pb-table">
+          <thead>
+            <tr>
+              <th>PB</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in stats.powerball_top %}
+            <tr>
+              <td><code>{{ "%02d"|format(row.pb) }}</code></td>
+              <td>{{ row.count }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <div class="small">No Powerball frequency data.</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="small">
+      <p>
+        Tip: use the API for the same data:
+        <code>/api/groups?window=100&amp;limit=20&amp;ks=2,3,4</code>
+      </p>
+    </div>
+  </body>
+</html>

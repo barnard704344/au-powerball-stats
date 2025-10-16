@@ -2,6 +2,8 @@ import os
 import sys
 import threading
 import logging
+import itertools
+from collections import Counter
 from flask import Flask, jsonify, render_template, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
@@ -57,6 +59,55 @@ def initial_sync_async():
 
 initial_sync_async()
 schedule_job()
+def compute_group_stats(window: int = 100, ks: tuple[int, ...] = (2, 3, 4), limit: int = 20):
+    """
+    Compute:
+      - Most common main-number groups (pairs/triples/quads) over the last `window` draws.
+      - Most common Powerball numbers over the last `window` draws.
+    Returns dict suitable for JSON or templating.
+    """
+    draws = get_draws(limit=window)  # newest first
+    # We want the latest N only; get_draws already returns newest-first.
+    # Normalize to list of main numbers + pb.
+    mains_list = []
+    powerballs = []
+    for d in draws:
+        nums = list(d.get("nums", []))
+        if len(nums) >= 7:
+            mains_list.append(sorted(nums[:7]))
+        pb = d.get("pb")
+        if isinstance(pb, int):
+            powerballs.append(pb)
+
+    # Count PB frequencies
+    pb_counts = Counter(powerballs)
+
+    # Count group combos for each k in ks
+    group_counts: dict[int, Counter] = {}
+    for k in ks:
+        c = Counter()
+        for nums in mains_list:
+            # unique combos per draw (combinations already produce unique sorted tuples)
+            for combo in itertools.combinations(nums, k):
+                c[combo] += 1
+        group_counts[k] = c
+
+    # Select top-N for each k
+    top_groups = {}
+    for k, counter in group_counts.items():
+        top_groups[k] = [{"combo": list(combo), "count": cnt} for combo, cnt in counter.most_common(limit)]
+
+    # PB top-N
+    top_pbs = [{"pb": n, "count": cnt} for n, cnt in pb_counts.most_common(limit)]
+
+    return {
+        "window": window,
+        "ks": list(ks),
+        "limit": limit,
+        "group_top": top_groups,  # {2: [...], 3: [...], 4: [...]}
+        "powerball_top": top_pbs,
+        "sample_size": len(mains_list),
+    }
 
 # ----------------------- Routes -----------------------
 @app.get("/")
@@ -75,6 +126,40 @@ def api_draws():
 def api_freqs():
     window = request.args.get("window", type=int)
     return jsonify(get_frequencies(window=window))
+
+@app.get("/api/groups")
+def api_groups():
+    """
+    JSON API for group frequency stats.
+      /api/groups?window=100&limit=20&ks=2,3,4
+    """
+    window = request.args.get("window", default=100, type=int)
+    limit = request.args.get("limit", default=20, type=int)
+    ks_param = request.args.get("ks", default="2,3,4")
+    try:
+        ks = tuple(sorted({int(x) for x in ks_param.split(",") if x.strip()}))
+    except Exception:
+        ks = (2, 3, 4)
+
+    stats = compute_group_stats(window=window, ks=ks, limit=limit)
+    return jsonify(stats)
+@app.get("/groups")
+def groups_page():
+    """
+    HTML page showing top main-number groups (pairs/triples/quads) and PB counts.
+      /groups?window=100&limit=20&ks=2,3,4
+    """
+    window = request.args.get("window", default=100, type=int)
+    limit = request.args.get("limit", default=20, type=int)
+    ks_param = request.args.get("ks", default="2,3,4")
+    try:
+        ks = tuple(sorted({int(x) for x in ks_param.split(",") if x.strip()}))
+    except Exception:
+        ks = (2, 3, 4)
+
+    stats = compute_group_stats(window=window, ks=ks, limit=limit)
+    return render_template("groups.html", stats=stats)
+
 
 @app.post("/refresh")
 def refresh():
