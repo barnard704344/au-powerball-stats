@@ -3,23 +3,20 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# OS deps for lxml parser and tzdata
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl ca-certificates tzdata libxml2 libxslt1.1 \
-    && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv/app
+
+# Install Python deps first for better layer caching
 COPY app/requirements.txt /srv/app/requirements.txt
 RUN pip install --no-cache-dir -r /srv/app/requirements.txt
 
-# App source
-COPY app /srv/app
-
-# Data dir
+# Code is bind-mounted by docker-compose (see volumes), so we don't COPY it here
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-# >>> REPLACE THIS WHOLE ENV BLOCK <<<
 ENV FLASK_HOST=0.0.0.0 \
     FLASK_PORT=8080 \
     UPDATE_CRON="*/15 * * * *" \
@@ -27,9 +24,8 @@ ENV FLASK_HOST=0.0.0.0 \
     DB_PATH=/data/powerball.sqlite \
     TZ=Australia/Adelaide \
     PYTHONPATH=/srv/app \
-    GUNICORN_CMD_ARGS="--log-level info --access-logfile - --error-logfile 
+    GUNICORN_CMD_ARGS="--log-level info --access-logfile - --error-logfile -"
 
 EXPOSE 8080
 
-# Start the app (includes scheduler)
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "-w", "2", "--timeout", "120", "app:app"]

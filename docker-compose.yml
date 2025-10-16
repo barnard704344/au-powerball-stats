@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    # Optional: name the image locally so compose won't try to pull a remote one
     image: au-powerball-stats-app:local
     container_name: au-powerball-stats
     ports:
@@ -13,6 +14,7 @@ services:
       PYTHONUNBUFFERED: "1"
       GUNICORN_CMD_ARGS: "--log-level info --access-logfile - --error-logfile -"
     volumes:
-      - ./app:/srv/app:ro   # ← runs EXACTLY what’s on disk after git pull
+      # Run the *exact* code you just pulled from Git:
+      - ./app:/srv/app:ro
       - ./data:/data
     restart: unless-stopped
