@@ -96,6 +96,40 @@ def _http_post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     raise RuntimeError("POST failed")
 
 
+def _api_fetch_productdraws(max_items: int = 600) -> List[Dict]:
+    """
+    Zero-dependency GET endpoint that returns a mixed list of recent draws.
+    We filter Powerball and normalise to our draw dicts.
+    """
+    url = "https://data.api.thelott.com/sales/vmax/web/data/lotto/productdraws"
+    # Use same headers we use elsewhere (desktop UA helps)
+    text = _http_get(url, headers=API_HEADERS)
+    try:
+        payload = json.loads(text)
+    except Exception as e:
+        log.warning("[API] productdraws JSON parse error: %s", e)
+        return []
+    raw = payload.get("Draws") or payload.get("draws") or []
+    items: List[Dict] = []
+    for obj in raw:
+        d = _to_draw_dict_from_api(obj)
+        if d and str(obj.get("ProductId", "")).lower() == "powerball":
+            items.append(d)
+            if len(items) >= max_items:
+                break
+    # sort ascending by draw number & de-dup
+    items.sort(key=lambda x: x["draw_no"])
+    dedup = []
+    seen = set()
+    for d in items:
+        if d["draw_no"] in seen:
+            continue
+        seen.add(d["draw_no"])
+        dedup.append(d)
+    log.info("[API] productdraws -> powerball rows=%d (pre-filter)", len(dedup))
+    return dedup
+
+
 # =============================================================================
 # JSON (The Lott) parsing
 # =============================================================================
@@ -353,16 +387,31 @@ def _parse_html_page(html: str, source_url: str) -> List[Dict]:
 
 
 def fetch_year(year: int) -> List[Dict]:
-    # Try JSON API first; fall back to HTML
+    """
+    Prefer: GET /productdraws (filter to the given year)
+    Fallbacks: POST history/draw results, then HTML archive.
+    """
+    try:
+        rows = _api_fetch_productdraws(max_items=1200)  # plenty to cover a full year
+        yrows = [d for d in rows if d["draw_date"].startswith(f"{year}-")]
+        if yrows:
+            log.info("[API] productdraws year %s -> rows=%d", year, len(yrows))
+            return yrows
+        log.info("[API] productdraws year %s -> 0; trying POST endpoints", year)
+    except Exception as e:
+        log.warning("[API] productdraws year %s error: %s; trying POST endpoints", year, e)
+
+    # Old POST path (might be blocked from your box)
     try:
         rows = _api_fetch_year(year)
         if rows:
-            log.info("[API] year %s -> rows=%d", year, len(rows))
+            log.info("[API] history/drawresults year %s -> rows=%d", year, len(rows))
             return rows
-        log.info("[API] year %s -> rows=0; falling back to HTML", year)
+        log.info("[API] POST year %s -> 0; falling back to HTML", year)
     except Exception as e:
-        log.warning("[API] year %s error: %s; falling back to HTML", year, e)
+        log.warning("[API] POST year %s error: %s; falling back to HTML", year, e)
 
+    # HTML fallback
     try:
         rows = _html_fetch_year(year)
         log.info("[HTML] year %s -> rows=%d", year, len(rows))
@@ -373,16 +422,37 @@ def fetch_year(year: int) -> List[Dict]:
 
 
 
+
 def _html_fetch_latest_6m() -> List[Dict]:
-     try:
+     """
+    Prefer the GET /productdraws feed then trim to last ~6 months.
+    Fallbacks: POST latest/history, then HTML 'past results'.
+    """
+    # 1) GET productdraws (fastest + most reliable)
+    try:
+        all_rows = _api_fetch_productdraws(max_items=600)
+        if all_rows:
+            # keep last ~183 days
+            today = dt.date.today()
+            cutoff = (today - dt.timedelta(days=183)).isoformat()
+            rows = [d for d in all_rows if d["draw_date"] >= cutoff]
+            log.info("[API] productdraws latest6m -> rows=%d (cutoff %s)", len(rows), cutoff)
+            return rows
+        log.info("[API] productdraws latest6m -> 0; trying POST endpoints")
+    except Exception as e:
+        log.warning("[API] productdraws latest6m error: %s; trying POST endpoints", e)
+
+    # 2) POST endpoints
+    try:
         rows = _api_fetch_latest_6m()
         if rows:
-            log.info("[API] latest6m -> rows=%d", len(rows))
+            log.info("[API] latestresults/history latest6m -> rows=%d", len(rows))
             return rows
-        log.info("[API] latest6m -> rows=0; falling back to HTML")
+        log.info("[API] latestresults/history latest6m -> 0; falling back to HTML")
     except Exception as e:
-        log.warning("[API] latest6m error: %s; falling back to HTML", e)
+        log.warning("[API] latestresults/history latest6m error: %s; falling back to HTML", e)
 
+    # 3) HTML fallback
     try:
         rows = _html_fetch_latest_6m()
         log.info("[HTML] latest6m -> rows=%d", len(rows))
