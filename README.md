@@ -10,9 +10,35 @@ Fetches Australian Powerball draw data, stores it in SQLite, and serves a small 
 
 ---
 
-## Quick Start (bind-mount dev mode — recommended)
+## Deployment
 
-This mode runs the **exact code from your working tree** inside the container via a bind-mount. A `git pull` updates the running app without an image rebuild.
+### Quick Deploy Script
+
+Create a deployment script for easy updates:
+
+```bash
+cat > /usr/local/bin/au_pb_deploy <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/au-powerball-stats
+git fetch --all --prune
+git reset --hard origin/main
+git clean -fd
+docker compose up -d
+docker exec -it au-powerball-stats /bin/sh -lc 'python - <<PY
+from app import app; print(app.url_map)
+PY'
+SH
+chmod +x /usr/local/bin/au_pb_deploy
+```
+
+Then deploy/update with:
+
+```bash
+au_pb_deploy
+```
+
+### Initial Setup
 
 ```bash
 # 1) ensure docker + compose are installed
@@ -20,8 +46,8 @@ docker version
 docker compose version
 
 # 2) clone and enter the repo
-git clone https://github.com/barnard704344/au-powerball-stats.git
-cd au-powerball-stats
+git clone https://github.com/barnard704344/au-powerball-stats.git /opt/au-powerball-stats
+cd /opt/au-powerball-stats
 
 # 3) start (builds image once, code is bind-mounted at /srv/app)
 docker compose up -d
@@ -31,26 +57,28 @@ curl -s http://localhost:8080/healthz | jq .
 
 # 5) populate data (incremental sync)
 curl -s -X POST http://localhost:8080/refresh | jq .
+```
 
-Keeping Code Up To Date (bind-mount)
+### Manual Update Process
 
-Because app/ is bind-mounted into the container, you do not need to rebuild after pulling changes.
+If you prefer manual updates instead of the deploy script:
 
+```bash
 cd /opt/au-powerball-stats
 git fetch origin
 git reset --hard origin/main   # change 'main' if your default branch differs
 git clean -fd
 docker compose up -d           # restarts the container with the new code
-
+```
 
 Verify the container is serving the new code:
 
-docker exec -it au-powerball-stats /bin/sh -lc '
-grep -n "debug_scrape" /srv/app/app.py || echo "no debug_scrape";
-python - <<PY
+```bash
+docker exec -it au-powerball-stats /bin/sh -lc 'python - <<PY
 from app import app
 print(app.url_map)
 PY'
+```
 
 Alternative: Immutable Image (copy-on-build)
 
