@@ -1,48 +1,54 @@
 import os
 import re
 import time
+import json
 import datetime as dt
-from typing import List, Dict, Iterable, Optional, Tuple
+from typing import List, Dict, Iterable, Optional, Tuple, Any
 
 import requests
 from bs4 import BeautifulSoup
 from db import upsert_draw
 
-# ---------------------------------------------------------------------
+# =============================================================================
 # Config
-# ---------------------------------------------------------------------
-BASE = "https://australia.national-lottery.com"
-PAST_RESULTS = f"{BASE}/powerball/past-results"
-ARCHIVE_FMT = f"{BASE}/powerball/results-archive-{{year}}"
-
-YEAR_START = int(os.environ.get("YEARS_START", "2018"))
-
-UA = {
-    # Heavier, desktop UA helps bypass some lightweight filters/CDNs
+# =============================================================================
+# Primary (JSON) source — used by thelott.com web.
+API_BASE = "https://data.api.thelott.com/sales/vmax/web/data/lotto/"
+API_HEADERS = {
+    # A common desktop browser UA helps dodge trivial bot screens
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-    "Accept-Language": "en-AU,en;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Referer": BASE + "/powerball/"
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.thelott.com",
+    "Referer": "https://www.thelott.com/",
 }
+
+# HTML fallback (secondary source)
+HTML_BASE = "https://australia.national-lottery.com"
+PAST_RESULTS = f"{HTML_BASE}/powerball/past-results"
+ARCHIVE_FMT = f"{HTML_BASE}/powerball/results-archive-{{year}}"
+
+# First year to backfill
+YEAR_START = int(os.environ.get("YEARS_START", "2018"))
 
 TIMEOUT = 30
 RETRIES = 3
 RETRY_BACKOFF = 3  # seconds
 
-# ---------------------------------------------------------------------
-# Date parsing
-# ---------------------------------------------------------------------
+
+# =============================================================================
+# Utilities
+# =============================================================================
 def _try_parse_date(s: str) -> Optional[str]:
     s = s.strip()
     for fmt in (
-        "%d %B, %Y",   # 12 October, 2024
-        "%d %B %Y",    # 12 October 2024
-        "%d %b, %Y",   # 12 Oct, 2024
-        "%d %b %Y",    # 12 Oct 2024
-        "%A %d %B %Y", # Thursday 12 October 2024
-        "%a %d %b %Y", # Thu 12 Oct 2024
+        "%Y-%m-%d",     # API dates often already ISO
+        "%d %B, %Y",    # 12 October, 2024
+        "%d %B %Y",     # 12 October 2024
+        "%d %b, %Y",    # 12 Oct, 2024
+        "%d %b %Y",     # 12 Oct 2024
+        "%A %d %B %Y",  # Thursday 12 October 2024
+        "%a %d %b %Y",  # Thu 12 Oct 2024
     ):
         try:
             return dt.datetime.strptime(s, fmt).date().isoformat()
@@ -50,31 +56,201 @@ def _try_parse_date(s: str) -> Optional[str]:
             continue
     return None
 
-# ---------------------------------------------------------------------
-# HTTP with retries
-# ---------------------------------------------------------------------
-def _fetch_html(url: str) -> str:
+
+def _http_get(url: str, headers: Dict[str, str], timeout: int = TIMEOUT) -> str:
     last_err = None
     for attempt in range(1, RETRIES + 1):
         try:
-            r = requests.get(url, headers=UA, timeout=TIMEOUT)
+            r = requests.get(url, headers=headers, timeout=timeout)
             r.raise_for_status()
-            # Some CDNs gzip without header; requests handles it but we keep text only
             return r.text
         except Exception as e:
             last_err = e
             if attempt < RETRIES:
                 time.sleep(RETRY_BACKOFF * attempt)
-            else:
-                raise
-    raise last_err  # type: ignore
+    if last_err:
+        raise last_err
+    raise RuntimeError("GET failed")
 
-# ---------------------------------------------------------------------
-# Parsing helpers
-# ---------------------------------------------------------------------
+
+def _http_post_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    POST to The Lott JSON endpoints with retries. Returns parsed JSON.
+    """
+    url = API_BASE + path.lstrip("/")
+    last_err = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.post(url, headers=API_HEADERS, json=payload, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            if attempt < RETRIES:
+                time.sleep(RETRY_BACKOFF * attempt)
+    if last_err:
+        raise last_err
+    raise RuntimeError("POST failed")
+
+
+# =============================================================================
+# JSON (The Lott) parsing
+# =============================================================================
+def _to_draw_dict_from_api(obj: Dict[str, Any]) -> Optional[Dict]:
+    """
+    Convert a single API result object into our canonical draw dict:
+      { draw_no, draw_date, nums[7], pb, source_url }
+    The API schema can vary slightly, so we defend against multiple field names.
+    """
+    # Identify Powerball-only rows
+    product = (obj.get("ProductId") or obj.get("ProductType") or obj.get("Product")) or ""
+    if str(product).lower() != "powerball":
+        return None
+
+    draw_no = obj.get("DrawNumber") or obj.get("DrawNo") or obj.get("DrawId")
+    draw_date_raw = obj.get("DrawDate") or obj.get("DrawDateTime") or obj.get("OpenDate")
+    date_iso = None
+    if isinstance(draw_date_raw, str):
+        # Many API returns are already 'YYYY-MM-DDT...' — extract the date
+        date_iso = _try_parse_date(draw_date_raw.split("T")[0])
+    if not date_iso and isinstance(draw_date_raw, str):
+        date_iso = _try_parse_date(draw_date_raw)
+
+    # Numbers (prefer explicit arrays)
+    main = (obj.get("PrimaryNumbers") or obj.get("WinningNumbers") or obj.get("Numbers") or [])
+    # Normalize if the API gave a "1,2,3,..." string
+    if isinstance(main, str):
+        main = [int(x) for x in re.findall(r"\d{1,2}", main)]
+    # Some responses include all numbers together; PB might be elsewhere
+    pb = obj.get("PowerballNumber") or obj.get("Powerball") or obj.get("SupplementaryNumbers")
+    if isinstance(pb, list) and pb:
+        # Some formats put PB as single-element list
+        pb = pb[0]
+    if pb is None:
+        # Last-resort guess: treat 8th as PB if exactly 8 numbers present
+        if isinstance(main, list) and len(main) == 8:
+            pb = main[-1]
+            main = main[:7]
+
+    # Final shape checks
+    if not (isinstance(main, list) and len(main) == 7 and isinstance(pb, (int, str))):
+        return None
+    try:
+        main = [int(x) for x in main]
+        pb = int(pb)
+    except Exception:
+        return None
+
+    if not (1 <= pb <= 20 and all(1 <= n <= 35 for n in main)):
+        # Out-of-range; probably mis-parsed
+        return None
+
+    if not draw_no or not date_iso:
+        return None
+
+    return {
+        "draw_no": int(draw_no),
+        "draw_date": date_iso,
+        "nums": main,
+        "pb": pb,
+        "source_url": "thelott-api",
+    }
+
+
+def _api_fetch_range_by_date(date_from: str, date_to: str) -> List[Dict]:
+    """
+    Try the 'historyresults' shape first; fall back to 'drawresults' if needed.
+    """
+    items: List[Dict] = []
+
+    # Attempt 1: historyresults by date range
+    try:
+        payload = {
+            "CompanyId": "GoldenCasket",  # common public value; NT/NSW variants also work
+            "MinDrawDate": date_from,
+            "MaxDrawDate": date_to,
+            "ProductFilter": ["Powerball"],
+        }
+        data = _http_post_json("historyresults", payload)
+        raw = data.get("DrawResults") or data.get("Results") or data
+        if isinstance(raw, list):
+            for obj in raw:
+                d = _to_draw_dict_from_api(obj)
+                if d:
+                    items.append(d)
+    except Exception as e:
+        print(f"[scraper] API historyresults error: {e}")
+
+    # Attempt 2: drawresults by (very wide) draw number range
+    if not items:
+        try:
+            payload = {
+                "CompanyId": "GoldenCasket",
+                "ProductFilter": ["Powerball"],
+                "DrawNumberFrom": 1,
+                "DrawNumberTo": 999999,
+            }
+            data = _http_post_json("drawresults", payload)
+            raw = data.get("DrawResults") or data.get("Results") or data
+            if isinstance(raw, list):
+                for obj in raw:
+                    d = _to_draw_dict_from_api(obj)
+                    if d:
+                        items.append(d)
+        except Exception as e:
+            print(f"[scraper] API drawresults error: {e}")
+
+    # Attempt 3: latestresults + paginate back by year (as last resort)
+    if not items:
+        try:
+            payload = {
+                "CompanyId": "GoldenCasket",
+                "MaxDrawCountPerProduct": 120,              # about ~2 years
+                "OptionalProductFilter": ["Powerball"],
+            }
+            data = _http_post_json("latestresults", payload)
+            raw = data.get("DrawResults") or data.get("Results") or data
+            if isinstance(raw, list):
+                for obj in raw:
+                    d = _to_draw_dict_from_api(obj)
+                    if d:
+                        items.append(d)
+        except Exception as e:
+            print(f"[scraper] API latestresults error: {e}")
+
+    print(f"[scraper] API range {date_from}..{date_to} -> rows={len(items)}")
+    # De-dup on draw_no (prefer latest instance)
+    seen = set()
+    deduped: List[Dict] = []
+    for d in sorted(items, key=lambda x: x["draw_no"]):
+        if d["draw_no"] in seen:
+            continue
+        seen.add(d["draw_no"])
+        deduped.append(d)
+    return deduped
+
+
+def _api_fetch_year(year: int) -> List[Dict]:
+    start = f"{year}-01-01"
+    end = f"{year}-12-31"
+    return _api_fetch_range_by_date(start, end)
+
+
+def _api_fetch_latest_6m(today: Optional[dt.date] = None) -> List[Dict]:
+    if today is None:
+        today = dt.date.today()
+    start = (today - dt.timedelta(days=183)).isoformat()
+    end = today.isoformat()
+    return _api_fetch_range_by_date(start, end)
+
+
+# =============================================================================
+# HTML fallback parsing (national-lottery.com)
+# =============================================================================
 DRAW_NO_RE = re.compile(r"\bDraw\s+(\d+)\b", re.IGNORECASE)
-DATE_RE    = re.compile(r"(\d{1,2}\s+\w+\s*,?\s*\d{4})")
-INT2_RE    = re.compile(r"\b(\d{1,2})\b")
+DATE_RE = re.compile(r"(\d{1,2}\s+\w+\s*,?\s*\d{4})")
+INT2_RE = re.compile(r"\b(\d{1,2})\b")
+
 
 def _safe_ints(xs) -> List[int]:
     out = []
@@ -85,6 +261,7 @@ def _safe_ints(xs) -> List[int]:
             pass
     return out
 
+
 def _extract_8_from_ul(ul) -> Optional[List[int]]:
     if not ul:
         return None
@@ -92,35 +269,8 @@ def _extract_8_from_ul(ul) -> Optional[List[int]]:
     nums = _safe_ints(INT2_RE.findall(" ".join(lis)))
     return nums if len(nums) == 8 else None
 
-def _extract_8_from_siblings(tag) -> Optional[List[int]]:
-    """
-    Walk a few next siblings looking for a list of 8 numbers (7 mains ≤35 + PB ≤20).
-    Stops quickly to avoid scooping prize tables.
-    """
-    hops = 0
-    cur = tag
-    while cur and hops < 6:
-        cur = cur.find_next_sibling()
-        hops += 1
-        if not cur:
-            break
-        # try list first
-        nums = _extract_8_from_ul(cur.find("ul"))
-        if nums:
-            return nums
-        # fallback: scrape numbery text from this sibling
-        txt = cur.get_text(" ", strip=True)
-        cand = _safe_ints(INT2_RE.findall(txt))
-        for i in range(0, max(0, len(cand) - 7)):
-            window = cand[i:i+8]
-            if len(window) == 8 and window[-1] <= 20 and all(1 <= n <= 35 for n in window[:-1]):
-                return window
-    return None
 
 def _extract_8_from_near(tag) -> Optional[List[int]]:
-    """
-    Very local text scan limited to ~200 chars AFTER where the date appears.
-    """
     full = tag.get_text(" ", strip=True)
     m = DATE_RE.search(full)
     after = full[m.end():m.end()+220] if m else full[:220]
@@ -131,11 +281,8 @@ def _extract_8_from_near(tag) -> Optional[List[int]]:
             return window
     return cand[:8] if len(cand) >= 8 else None
 
-def _parse_block(text: str, origin_tag, source_url: str) -> Optional[Dict]:
-    """
-    Given a block of text that contains 'Draw ####' and a parseable date,
-    extract numbers from the next <ul>, siblings, or a constrained text slice.
-    """
+
+def _parse_block(text: str, tag, source_url: str) -> Optional[Dict]:
     m_no = DRAW_NO_RE.search(text)
     if not m_no:
         return None
@@ -146,34 +293,29 @@ def _parse_block(text: str, origin_tag, source_url: str) -> Optional[Dict]:
     if not draw_date:
         return None
 
-    # Try: next UL under/after the tag
-    ul = origin_tag.find_next("ul") if hasattr(origin_tag, "find_next") else None
-    nums = _extract_8_from_ul(ul)
-
-    # Try: a few next siblings
-    if not nums:
-        nums = _extract_8_from_siblings(origin_tag)
-
-    # Try: constrained nearby text
-    if not nums:
-        nums = _extract_8_from_near(origin_tag)
-
+    ul = tag.find_next("ul") if hasattr(tag, "find_next") else None
+    nums = _extract_8_from_ul(ul) or _extract_8_from_near(tag)
     if not nums or len(nums) != 8:
+        return None
+
+    main, pb = nums[:7], nums[7]
+    if not (1 <= pb <= 20 and all(1 <= n <= 35 for n in main)):
         return None
 
     return {
         "draw_no": draw_no,
         "draw_date": draw_date,
-        "nums": nums[:7],
-        "pb": nums[7],
-        "source_url": source_url
+        "nums": main,
+        "pb": pb,
+        "source_url": source_url,
     }
 
-def _parse_page(html: str, source_url: str) -> List[Dict]:
+
+def _parse_html_page(html: str, source_url: str) -> List[Dict]:
     soup = BeautifulSoup(html, "lxml")
     items: List[Dict] = []
 
-    # Strategy 1: <a> elements that mention "Draw ####"
+    # Strategy 1: anchors that include "Draw ####"
     for a in soup.find_all("a"):
         t = a.get_text(" ", strip=True)
         if "draw" not in t.lower():
@@ -184,7 +326,7 @@ def _parse_page(html: str, source_url: str) -> List[Dict]:
         if row:
             items.append(row)
 
-    # Strategy 2: headings/paragraphs/divs with "Draw ####" (not inside <a>)
+    # Strategy 2: headers/paragraphs with "Draw ####" if anchors found nothing
     if not items:
         for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "div", "span", "li"]):
             txt = tag.get_text(" ", strip=True)
@@ -196,7 +338,7 @@ def _parse_page(html: str, source_url: str) -> List[Dict]:
             if row:
                 items.append(row)
 
-    # De-dup by draw_no
+    # De-dup
     seen = set()
     uniq: List[Dict] = []
     for d in items:
@@ -206,33 +348,52 @@ def _parse_page(html: str, source_url: str) -> List[Dict]:
         uniq.append(d)
     return uniq
 
-# ---------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------
-def fetch_year(year: int) -> List[Dict]:
+
+def _html_fetch_year(year: int) -> List[Dict]:
     url = ARCHIVE_FMT.format(year=year)
-    html = _fetch_html(url)
-    # DEBUG: show page size and naive "Draw ####" occurrences before parsing
+    html = _http_get(url, headers=API_HEADERS)
     raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
-    print(f"[scraper] GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
-    items = _parse_page(html, url)
-    print(f"[scraper] parsed {url} -> rows={len(items)}")
+    print(f"[scraper] HTML GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
+    items = _parse_html_page(html, url)
+    print(f"[scraper] HTML parsed {url} -> rows={len(items)}")
     return items
+
+
+def _html_fetch_latest_6m() -> List[Dict]:
+    url = PAST_RESULTS
+    html = _http_get(url, headers=API_HEADERS)
+    raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
+    print(f"[scraper] HTML GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
+    items = _parse_html_page(html, url)
+    print(f"[scraper] HTML parsed {url} -> rows={len(items)}")
+    return items
+
+
+# =============================================================================
+# Public API expected by app.py
+# =============================================================================
+def fetch_year(year: int) -> List[Dict]:
+    """
+    Prefer JSON API; fall back to HTML.
+    """
+    rows = _api_fetch_year(year)
+    if rows:
+        return rows
+    print(f"[scraper] API returned 0 for year {year}; falling back to HTML…")
+    return _html_fetch_year(year)
 
 
 def fetch_latest_six_months() -> List[Dict]:
-    url = PAST_RESULTS
-    html = _fetch_html(url)
-    raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
-    print(f"[scraper] GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
-    items = _parse_page(html, url)
-    print(f"[scraper] parsed {url} -> rows={len(items)}")
-    return items
+    rows = _api_fetch_latest_6m()
+    if rows:
+        return rows
+    print("[scraper] API returned 0 for latest; falling back to HTML…")
+    return _html_fetch_latest_6m()
+
 
 def sync_all() -> Dict[str, int]:
     """
-    Pull YEAR_START..current plus 'past results' page, upsert into DB.
-    Returns a simple counter for the caller.
+    Pull YEAR_START..current + latest 6 months and upsert.
     """
     added_or_updated = 0
     seen = set()
@@ -241,6 +402,7 @@ def sync_all() -> Dict[str, int]:
     def upsert_many(items: Iterable[Dict]):
         nonlocal added_or_updated
         for d in items:
+            # de-dup across sources/years
             if d["draw_no"] in seen:
                 continue
             seen.add(d["draw_no"])
@@ -252,15 +414,15 @@ def sync_all() -> Dict[str, int]:
         try:
             upsert_many(fetch_year(y))
         except Exception as e:
-            problems.append((ARCHIVE_FMT.format(year=y), str(e)))
+            problems.append((f"year:{y}", str(e)))
 
     try:
         upsert_many(fetch_latest_six_months())
     except Exception as e:
-        problems.append((PAST_RESULTS, str(e)))
+        problems.append(("latest6m", str(e)))
 
     print(f"[scraper] upserted total: {added_or_updated}, problems: {len(problems)}")
-    for url, err in problems:
-        print(f"[scraper] ERROR {url}: {err}")
+    for where, err in problems:
+        print(f"[scraper] ERROR {where}: {err}")
 
     return {"upserted": added_or_updated}
