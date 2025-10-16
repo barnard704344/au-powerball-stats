@@ -422,10 +422,10 @@ def sync_all() -> Dict[str, int]:
     seen = set()
     problems: List[Tuple[str, str]] = []
 
-    def upsert_many(items: Iterable[Dict]):
+    def upsert_many(items: Iterable[Dict], label: str):
         nonlocal added_or_updated
+        log.info("Upserting %d items from %s", len(items), label)
         for d in items:
-            # de-dup across sources/years
             if d["draw_no"] in seen:
                 continue
             seen.add(d["draw_no"])
@@ -433,19 +433,25 @@ def sync_all() -> Dict[str, int]:
             added_or_updated += 1
 
     year_now = dt.date.today().year
+    log.info("sync_all: starting YEAR_START=%s..%s", YEAR_START, year_now)
+
     for y in range(YEAR_START, year_now + 1):
         try:
-            upsert_many(fetch_year(y))
+            rows = fetch_year(y)
+            upsert_many(rows, f"year {y}")
         except Exception as e:
             problems.append((f"year:{y}", str(e)))
+            log.exception("sync_all year %s failed: %s", y, e)
 
     try:
-        upsert_many(fetch_latest_six_months())
+        latest_rows = fetch_latest_six_months()
+        upsert_many(latest_rows, "latest6m")
     except Exception as e:
         problems.append(("latest6m", str(e)))
+        log.exception("sync_all latest6m failed: %s", e)
 
-    print(f"[scraper] upserted total: {added_or_updated}, problems: {len(problems)}")
+    log.info("sync_all: upserted=%d, problems=%d", added_or_updated, len(problems))
     for where, err in problems:
-        print(f"[scraper] ERROR {where}: {err}")
+        log.error("sync_all ERROR %s: %s", where, err)
 
     return {"upserted": added_or_updated}
