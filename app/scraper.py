@@ -20,6 +20,7 @@ YEAR_START = int(os.environ.get("YEARS_START", "2018"))
 
 def _parse_rows(soup: BeautifulSoup, source_url: str) -> List[Dict]:
     results = []
+    # Look for anchors whose text starts with "Draw #### d MMMM, YYYY"
     for a in soup.find_all("a"):
         t = a.text.strip()
         if not t.startswith("Draw "):
@@ -27,13 +28,16 @@ def _parse_rows(soup: BeautifulSoup, source_url: str) -> List[Dict]:
         m = re.match(r"Draw\s+(\d+)\s+(\d{1,2}\s+\w+,\s+\d{4})", t)
         if not m:
             continue
+
         draw_no = int(m.group(1))
         draw_date = dt.datetime.strptime(m.group(2), "%d %B, %Y").date().isoformat()
 
+        # Numbers are typically in the next <ul> as 8 <li> items (7 main + 1 PB)
         ul = a.find_next("ul")
         if ul:
             nums = [int(li.text.strip()) for li in ul.find_all("li")]
         else:
+            # Fallback: extract first 8 integers from the parent block
             block = a.find_parent().get_text(separator=" ").strip()
             nums = list(map(int, re.findall(r"\b\d+\b", block)))[0:8]
 
@@ -50,9 +54,10 @@ def _parse_rows(soup: BeautifulSoup, source_url: str) -> List[Dict]:
     return results
 
 def fetch_year(year: int) -> List[Dict]:
-    r = requests.get(ARCHIVE_FMT.format(year=year), headers=UA, timeout=30)
+    url = ARCHIVE_FMT.format(year=year)
+    r = requests.get(url, headers=UA, timeout=30)
     r.raise_for_status()
-    return _parse_rows(BeautifulSoup(r.text, "lxml"), ARCHIVE_FMT.format(year=year))
+    return _parse_rows(BeautifulSoup(r.text, "lxml"), url)
 
 def fetch_latest_six_months() -> List[Dict]:
     r = requests.get(PAST_RESULTS, headers=UA, timeout=30)
@@ -60,11 +65,15 @@ def fetch_latest_six_months() -> List[Dict]:
     return _parse_rows(BeautifulSoup(r.text, "lxml"), PAST_RESULTS)
 
 def sync_all() -> Dict[str, int]:
+    """
+    Pull YEAR_START..current and the 'past results' page, upsert into DB.
+    Returns {"upserted": N}
+    """
     added_or_updated = 0
     seen = set()
 
     def upsert_many(items: Iterable[Dict]):
-        nonlocal added_or_updated, seen
+        nonlocal added_or_updated
         for d in items:
             if d["draw_no"] in seen:
                 continue
