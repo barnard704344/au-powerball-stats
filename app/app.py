@@ -95,13 +95,14 @@ def refresh():
 def debug_scrape():
     try:
         year = request.args.get("year", type=int)
+        from scraper import debug_probe  # local import to avoid cycles
+        diag = debug_probe(year=year)
+        # Also include the high-level count via the normal fetch paths
         if year:
-            log.info("Debug scrape (year=%s) requested", year)
             rows = fetch_year(year)
-            return jsonify({"ok": True, "mode": "year", "year": year, "count": len(rows), "sample": rows[:3]})
-        log.info("Debug scrape (latest 6m) requested")
+            return jsonify({"ok": True, "mode": "year", "count": len(rows), "sample": rows[:3], **diag})
         rows = fetch_latest_six_months()
-        return jsonify({"ok": True, "mode": "latest", "count": len(rows), "sample": rows[:3]})
+        return jsonify({"ok": True, "mode": "latest", "count": len(rows), "sample": rows[:3], **diag})
     except Exception as e:
         log.exception("Debug scrape failed: %s", e)
         return jsonify({"ok": False, "error": str(e)}), 500

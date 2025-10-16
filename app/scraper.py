@@ -135,41 +135,94 @@ def _api_fetch_productdraws(max_items: int = 600) -> List[Dict]:
 # =============================================================================
 def _to_draw_dict_from_api(obj: Dict[str, Any]) -> Optional[Dict]:
     """
-    Convert a single API result object into our canonical draw dict:
+    Convert a single API result object into:
       { draw_no, draw_date, nums[7], pb, source_url }
-    The API schema can vary slightly, so we defend against multiple field names.
+    This handles common schema variants seen across The Lott feeds.
     """
-    # Identify Powerball-only rows
-    product = (obj.get("ProductId") or obj.get("ProductType") or obj.get("Product")) or ""
-    if str(product).lower() != "powerball":
+    # Identify Powerball rows (varies a little per feed)
+    product = (
+        obj.get("ProductId") or
+        obj.get("ProductType") or
+        obj.get("Product") or
+        obj.get("ProductName") or
+        ""
+    )
+    if str(product).strip().lower() != "powerball":
         return None
 
-    draw_no = obj.get("DrawNumber") or obj.get("DrawNo") or obj.get("DrawId")
-    draw_date_raw = obj.get("DrawDate") or obj.get("DrawDateTime") or obj.get("OpenDate")
+    # Draw number
+    draw_no = (
+        obj.get("DrawNumber") or
+        obj.get("DrawNo") or
+        obj.get("DrawId") or
+        obj.get("Draw") or
+        obj.get("Number")
+    )
+    try:
+        draw_no = int(draw_no)
+    except Exception:
+        return None
+
+    # Date — consider multiple possibilities
+    draw_date_raw = (
+        obj.get("DrawDate") or
+        obj.get("DrawDateUTC") or
+        obj.get("DrawDateTime") or
+        obj.get("DrawDateTimeUTC") or
+        obj.get("OpenDate") or
+        obj.get("CloseDate")
+    )
     date_iso = None
     if isinstance(draw_date_raw, str):
-        # Many API returns are already 'YYYY-MM-DDT...' — extract the date
-        date_iso = _try_parse_date(draw_date_raw.split("T")[0])
-    if not date_iso and isinstance(draw_date_raw, str):
-        date_iso = _try_parse_date(draw_date_raw)
+        # If we see an ISO-ish string like 2024-10-12T20:30:00Z, split at 'T'
+        head = draw_date_raw.split("T")[0]
+        date_iso = _try_parse_date(head) or _try_parse_date(draw_date_raw)
+    if not date_iso:
+        return None
 
-    # Numbers (prefer explicit arrays)
-    main = (obj.get("PrimaryNumbers") or obj.get("WinningNumbers") or obj.get("Numbers") or [])
-    # Normalize if the API gave a "1,2,3,..." string
+    # Main numbers — prefer explicit list fields, but tolerate comma strings
+    main = (
+        obj.get("PrimaryNumbers") or
+        obj.get("WinningNumbers") or
+        obj.get("Numbers") or
+        obj.get("PrimaryWinningNumbers") or
+        obj.get("MainNumbers") or
+        []
+    )
     if isinstance(main, str):
         main = [int(x) for x in re.findall(r"\d{1,2}", main)]
-    # Some responses include all numbers together; PB might be elsewhere
-    pb = obj.get("PowerballNumber") or obj.get("Powerball") or obj.get("SupplementaryNumbers")
-    if isinstance(pb, list) and pb:
-        # Some formats put PB as single-element list
-        pb = pb[0]
-    if pb is None:
-        # Last-resort guess: treat 8th as PB if exactly 8 numbers present
-        if isinstance(main, list) and len(main) == 8:
-            pb = main[-1]
-            main = main[:7]
+    elif isinstance(main, list):
+        # Coerce string digits to int
+        try:
+            main = [int(x) for x in main]
+        except Exception:
+            return None
+    else:
+        main = []
 
-    # Final shape checks
+    # Powerball — can appear in several places
+    pb = (
+        obj.get("PowerballNumber") or
+        obj.get("Powerball") or
+        obj.get("BonusNumber") or
+        None
+    )
+    if pb is None:
+        # Some feeds place PB in "SecondaryNumbers" or "SupplementaryNumbers"
+        sec = obj.get("SecondaryNumbers") or obj.get("SupplementaryNumbers") or []
+        if isinstance(sec, list) and sec:
+            # Often PB is the first/only item in this list
+            try:
+                pb = int(sec[0])
+            except Exception:
+                pb = None
+
+    # If still no PB but we got 8 numbers total in "main", split 7+1
+    if pb is None and isinstance(main, list) and len(main) == 8:
+        pb = int(main[-1])
+        main = main[:7]
+
+    # Final guards
     if not (isinstance(main, list) and len(main) == 7 and isinstance(pb, (int, str))):
         return None
     try:
@@ -178,20 +231,18 @@ def _to_draw_dict_from_api(obj: Dict[str, Any]) -> Optional[Dict]:
     except Exception:
         return None
 
+    # Range sanity (AU Powerball)
     if not (1 <= pb <= 20 and all(1 <= n <= 35 for n in main)):
-        # Out-of-range; probably mis-parsed
-        return None
-
-    if not draw_no or not date_iso:
         return None
 
     return {
-        "draw_no": int(draw_no),
+        "draw_no": draw_no,
         "draw_date": date_iso,
         "nums": main,
         "pb": pb,
         "source_url": "thelott-api",
     }
+
 
 
 def _api_fetch_range_by_date(date_from: str, date_to: str) -> List[Dict]:
@@ -384,6 +435,55 @@ def _parse_html_page(html: str, source_url: str) -> List[Dict]:
         seen.add(d["draw_no"])
         uniq.append(d)
     return uniq
+
+def debug_probe(year: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Return detailed diagnostics so the UI/user can see exactly what we fetched.
+    Includes:
+      - productdraws GET stats (count, first item keys)
+      - POST historyresults/drawresults stats
+      - HTML fallback stats (html_len, regex matches)
+    """
+    diag: Dict[str, Any] = {"year": year}
+
+    # 1) productdraws GET
+    try:
+        prod = _api_fetch_productdraws(max_items=1200)
+        diag["productdraws_total"] = len(prod)
+        diag["productdraws_first_keys"] = list(prod[0].keys()) if prod else []
+        if year:
+            diag["productdraws_year_count"] = sum(1 for d in prod if d["draw_date"].startswith(f"{year}-"))
+    except Exception as e:
+        diag["productdraws_error"] = str(e)
+
+    # 2) POST endpoints (range)
+    try:
+        if year:
+            yr = _api_fetch_year(year)
+            diag["post_year_count"] = len(yr)
+            diag["post_year_first_keys"] = list(yr[0].keys()) if yr else []
+        else:
+            last = _api_fetch_latest_6m()
+            diag["post_latest6m_count"] = len(last)
+            diag["post_latest6m_first_keys"] = list(last[0].keys()) if last else []
+    except Exception as e:
+        diag["post_error"] = str(e)
+
+    # 3) HTML fallback
+    try:
+        if year:
+            url = ARCHIVE_FMT.format(year=year)
+        else:
+            url = PAST_RESULTS
+        html = _http_get(url, headers=API_HEADERS)
+        raw = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
+        diag["html_url"] = url
+        diag["html_len"] = len(html)
+        diag["html_raw_draw_tokens"] = raw
+    except Exception as e:
+        diag["html_error"] = str(e)
+
+    return diag
 
 
 def fetch_year(year: int) -> List[Dict]:
