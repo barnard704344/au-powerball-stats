@@ -4,21 +4,20 @@ import threading
 import logging
 import itertools
 from collections import Counter
+
 from flask import Flask, jsonify, render_template, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(levelname)s] %(asctime)s %(name)s: %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(asctime)s %(name)s: %(message)s')
 log = logging.getLogger("app")
 
+# Ensure local module imports work under gunicorn
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from db import init_db, get_draws, get_frequencies, upsert_draw  # upsert for /dev/seed
+from db import init_db, get_draws, get_frequencies  # Powerball DB helpers
 from scraper import sync_all, fetch_year, fetch_latest_six_months, debug_probe
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
@@ -36,7 +35,7 @@ def job_sync():
     try:
         log.info("Scheduled sync: starting…")
         result = sync_all()
-        log.info("Scheduled sync: %s", result)
+        log.info("Scheduled sync complete: %s", result)
     except Exception as e:
         log.exception("Scheduled sync failed: %s", e)
 
@@ -45,20 +44,22 @@ def schedule_job():
     trigger = CronTrigger.from_crontab(UPDATE_CRON, timezone=LOCAL_TZ)
     scheduler.add_job(job_sync, trigger, id="sync_job", replace_existing=True)
     scheduler.start()
-    log.info("Scheduler started with cron: %s", UPDATE_CRON)
+    log.info("Scheduler started: %s", UPDATE_CRON)
 
 def initial_sync_async():
     def _run():
         try:
             log.info("Initial sync: starting…")
-            result = sync_all()
-            log.info("Initial sync: %s", result)
+            res = sync_all()
+            log.info("Initial sync: %s", res)
         except Exception as e:
             log.exception("Initial sync failed: %s", e)
     threading.Thread(target=_run, daemon=True).start()
 
 initial_sync_async()
 schedule_job()
+
+# ----------------------- Computation helpers -----------------------
 def compute_group_stats(window: int = 100, ks: tuple[int, ...] = (2, 3, 4), limit: int = 20):
     """
     Compute:
@@ -67,8 +68,6 @@ def compute_group_stats(window: int = 100, ks: tuple[int, ...] = (2, 3, 4), limi
     Returns dict suitable for JSON or templating.
     """
     draws = get_draws(limit=window)  # newest first
-    # We want the latest N only; get_draws already returns newest-first.
-    # Normalize to list of main numbers + pb.
     mains_list = []
     powerballs = []
     for d in draws:
@@ -79,37 +78,35 @@ def compute_group_stats(window: int = 100, ks: tuple[int, ...] = (2, 3, 4), limi
         if isinstance(pb, int):
             powerballs.append(pb)
 
-    # Count PB frequencies
+    # PB frequencies
     pb_counts = Counter(powerballs)
 
-    # Count group combos for each k in ks
+    # Group counts for each k
     group_counts: dict[int, Counter] = {}
     for k in ks:
         c = Counter()
         for nums in mains_list:
-            # unique combos per draw (combinations already produce unique sorted tuples)
-            for combo in itertools.combinations(nums, k):
+            for combo in itertools.combinations(nums, k):  # combos already sorted/unique
                 c[combo] += 1
         group_counts[k] = c
 
-    # Select top-N for each k
+    # Top-N selections
     top_groups = {}
     for k, counter in group_counts.items():
         top_groups[k] = [{"combo": list(combo), "count": cnt} for combo, cnt in counter.most_common(limit)]
 
-    # PB top-N
     top_pbs = [{"pb": n, "count": cnt} for n, cnt in pb_counts.most_common(limit)]
 
     return {
         "window": window,
         "ks": list(ks),
         "limit": limit,
-        "group_top": top_groups,  # {2: [...], 3: [...], 4: [...]}
+        "group_top": top_groups,   # {2: [...], 3: [...], 4: [...]}
         "powerball_top": top_pbs,
         "sample_size": len(mains_list),
     }
 
-# ----------------------- Routes -----------------------
+# ----------------------- Routes: UI & APIs -----------------------
 @app.get("/")
 def index():
     window = request.args.get("window", type=int)
@@ -130,8 +127,7 @@ def api_freqs():
 @app.get("/api/groups")
 def api_groups():
     """
-    JSON API for group frequency stats.
-      /api/groups?window=100&limit=20&ks=2,3,4
+    JSON API: /api/groups?window=100&limit=20&ks=2,3,4
     """
     window = request.args.get("window", default=100, type=int)
     limit = request.args.get("limit", default=20, type=int)
@@ -140,14 +136,13 @@ def api_groups():
         ks = tuple(sorted({int(x) for x in ks_param.split(",") if x.strip()}))
     except Exception:
         ks = (2, 3, 4)
-
     stats = compute_group_stats(window=window, ks=ks, limit=limit)
     return jsonify(stats)
+
 @app.get("/groups")
 def groups_page():
     """
-    HTML page showing top main-number groups (pairs/triples/quads) and PB counts.
-      /groups?window=100&limit=20&ks=2,3,4
+    HTML page: /groups?window=100&limit=20&ks=2,3,4
     """
     window = request.args.get("window", default=100, type=int)
     limit = request.args.get("limit", default=20, type=int)
@@ -156,15 +151,13 @@ def groups_page():
         ks = tuple(sorted({int(x) for x in ks_param.split(",") if x.strip()}))
     except Exception:
         ks = (2, 3, 4)
-
     stats = compute_group_stats(window=window, ks=ks, limit=limit)
     return render_template("groups.html", stats=stats)
-
 
 @app.post("/refresh")
 def refresh():
     try:
-        log.info("Manual refresh: /refresh called from %s", request.remote_addr)
+        log.info("Manual refresh from %s", request.remote_addr)
         result = sync_all()
         log.info("Manual refresh: %s", result)
         return jsonify({"status": "ok", **result})
@@ -185,23 +178,6 @@ def debug_scrape():
     except Exception as e:
         log.exception("Debug scrape failed: %s", e)
         return jsonify({"ok": False, "error": str(e)}), 500
-
-# Seed a few rows to validate DB->UI pipeline (protect with token if desired)
-@app.post("/dev/seed")
-def dev_seed():
-    token = os.environ.get("SEED_TOKEN")
-    supplied = request.headers.get("X-Seed-Token")
-    if token and token != supplied:
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-    # 3 realistic rows
-    samples = [
-        {"draw_no": 1410, "draw_date": "2024-01-04", "nums": [2, 9, 17, 23, 28, 31, 35], "pb": 10, "source_url": "seed"},
-        {"draw_no": 1411, "draw_date": "2024-01-11", "nums": [1, 7, 12, 19, 21, 27, 33], "pb": 5, "source_url": "seed"},
-        {"draw_no": 1412, "draw_date": "2024-01-18", "nums": [3, 6, 14, 20, 22, 30, 34], "pb": 12, "source_url": "seed"},
-    ]
-    for s in samples:
-        upsert_draw(s)
-    return jsonify({"ok": True, "seeded": len(samples)})
 
 @app.get("/healthz")
 def healthz():
