@@ -285,16 +285,7 @@ def api_prediction():
     return jsonify(data)
 
 
-@app.get("/api/prediction")
-def api_prediction():
-    """
-    Returns the most frequent main number(s) and powerball over the last N draws,
-    with deterministic tie-breaking to pick a single suggested main and PB.
-    Query: /api/prediction?window=100
-    """
-    window = request.args.get("window", default=100, type=int)
-    data = compute_prediction(window=window)
-    return jsonify(data)
+
 
 @app.get("/prediction")
 def prediction_page():
