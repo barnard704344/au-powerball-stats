@@ -77,12 +77,12 @@ def refresh():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-# ---------- NEW: Debug endpoint to inspect scraper output ----------
+# ---------- DEBUG endpoint ----------
 @app.get("/debug/scrape")
 def debug_scrape():
     """
-    /debug/scrape?year=2024  -> returns JSON with count & sample for that year
-    /debug/scrape            -> returns JSON with count & sample for 'past results'
+    /debug/scrape?year=2024  -> JSON {ok,count,sample}
+    /debug/scrape            -> JSON {ok,count,sample} from past-results
     """
     try:
         year = request.args.get("year", type=int)
@@ -92,7 +92,6 @@ def debug_scrape():
         rows = fetch_latest_six_months()
         return jsonify({"ok": True, "mode": "latest", "count": len(rows), "sample": rows[:3]})
     except Exception as e:
-        # Always return JSON so jq won't choke
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.get("/healthz")
