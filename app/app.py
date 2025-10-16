@@ -59,6 +59,91 @@ def initial_sync_async():
 initial_sync_async()
 schedule_job()
 
+def compute_prediction(window: int = 100):
+    """
+    Returns a 'prediction' based on simple frequencies over the last `window` draws:
+      - main_top_numbers: list of the most frequent main numbers (could be multiple on tie)
+      - powerball_top_numbers: list of the most frequent PB numbers (could be multiple on tie)
+      - chosen_main / chosen_powerball: single picks after deterministic tie-breaking
+        Tie-break rules:
+          1) Highest frequency
+          2) If tie: pick the number that appeared most recently (latest draw)
+          3) If still tie: lowest numeric value
+    Also returns full frequency tables and counts for transparency.
+    """
+    # Frequency tables over the last N
+    freqs = get_frequencies(window=window)
+    main_freq = freqs.get("main", {}) or {}
+    pb_freq = freqs.get("powerball", {}) or {}
+
+    # Normalize keys to ints
+    main_freq = {int(k): int(v) for k, v in main_freq.items()}
+    pb_freq = {int(k): int(v) for k, v in pb_freq.items()}
+
+    # Helper to compute top list + chosen via tie-breaking
+    def pick_top(freq_map: dict[int, int], candidates_pool: set[int] | None = None):
+        if not freq_map:
+            return {"top_list": [], "chosen": None, "top_count": 0}
+
+        # If a pool is provided, restrict to it (we won’t use pool here, but keep generic)
+        items = [(n, c) for n, c in freq_map.items() if (candidates_pool is None or n in candidates_pool)]
+        if not items:
+            return {"top_list": [], "chosen": None, "top_count": 0}
+
+        max_count = max(c for _, c in items)
+        top_list = sorted([n for n, c in items if c == max_count])
+
+        # Tie-breaker: recency, then lowest number
+        if len(top_list) == 1:
+            chosen = top_list[0]
+        else:
+            # look through the last `window` draws (newest first) to find the earliest occurrence index
+            draws = get_draws(limit=window)  # newest first
+            most_recent_rank = {}
+            for idx, d in enumerate(draws):
+                # smaller idx = more recent
+                nums = d.get("nums") or []
+                pb = d.get("pb")
+                for n in top_list:
+                    if n in nums or n == pb:
+                        # record first time we see it in the reverse-chronological list
+                        most_recent_rank.setdefault(n, idx)
+                # Early exit if all have been ranked
+                if len(most_recent_rank) == len(top_list):
+                    break
+
+            # Build candidates with (recency_idx, numeric) for stable sort
+            ranked = []
+            for n in top_list:
+                # if somehow never seen in the window (shouldn’t happen), give a large idx
+                idx = most_recent_rank.get(n, 10**9)
+                ranked.append((idx, n))
+            ranked.sort(key=lambda t: (t[0], t[1]))  # smaller idx (more recent) first, then smaller number
+            chosen = ranked[0][1]
+
+        return {"top_list": top_list, "chosen": chosen, "top_count": max_count}
+
+    main_pick = pick_top(main_freq)
+    pb_pick = pick_top(pb_freq)
+
+    return {
+        "window": window,
+        "main": {
+            "top_numbers": main_pick["top_list"],
+            "top_count": main_pick["top_count"],
+            "chosen_main": main_pick["chosen"],
+            "frequency_table": main_freq,
+        },
+        "powerball": {
+            "top_numbers": pb_pick["top_list"],
+            "top_count": pb_pick["top_count"],
+            "chosen_powerball": pb_pick["chosen"],
+            "frequency_table": pb_freq,
+        },
+        "note": "This is a descriptive stat over the last N draws, not a true predictor. Powerball draws are independent.",
+    }
+
+
 # ----------------------- Computation helpers -----------------------
 def compute_group_stats(window: int = 100, ks: tuple[int, ...] = (2, 3, 4), limit: int = 20):
     """
@@ -123,6 +208,18 @@ def api_draws():
 def api_freqs():
     window = request.args.get("window", type=int)
     return jsonify(get_frequencies(window=window))
+
+@app.get("/api/prediction")
+def api_prediction():
+    """
+    Returns the most frequent main number(s) and powerball over the last N draws,
+    with deterministic tie-breaking to pick a single suggested main and PB.
+    Query: /api/prediction?window=100
+    """
+    window = request.args.get("window", default=100, type=int)
+    data = compute_prediction(window=window)
+    return jsonify(data)
+
 
 @app.get("/api/groups")
 def api_groups():
