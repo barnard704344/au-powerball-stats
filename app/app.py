@@ -1,9 +1,17 @@
 import os
 import sys
 import threading
+import logging
 from flask import Flask, jsonify, render_template, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
+
+# ---------- Logging config ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(levelname)s] %(asctime)s %(name)s: %(message)s'
+)
+log = logging.getLogger("app")
 
 # Ensure local imports under gunicorn
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,25 +34,27 @@ scheduler = BackgroundScheduler(timezone=LOCAL_TZ)
 
 def job_sync():
     try:
+        log.info("Scheduled sync: starting…")
         result = sync_all()
-        app.logger.info(f"Sync complete: {result}")
+        log.info("Scheduled sync: %s", result)
     except Exception as e:
-        app.logger.exception(f"Sync failed: {e}")
+        log.exception("Scheduled sync failed: %s", e)
 
 def schedule_job():
     from apscheduler.triggers.cron import CronTrigger
     trigger = CronTrigger.from_crontab(UPDATE_CRON, timezone=LOCAL_TZ)
     scheduler.add_job(job_sync, trigger, id="sync_job", replace_existing=True)
     scheduler.start()
+    log.info("Scheduler started with cron: %s", UPDATE_CRON)
 
 def initial_sync_async():
     def _run():
         try:
-            app.logger.info("Initial sync started…")
-            sync_all()
-            app.logger.info("Initial sync finished.")
+            log.info("Initial sync: starting…")
+            result = sync_all()
+            log.info("Initial sync: %s", result)
         except Exception as e:
-            app.logger.exception(f"Initial sync failed: {e}")
+            log.exception("Initial sync failed: %s", e)
     threading.Thread(target=_run, daemon=True).start()
 
 # Kick off initial sync and schedule recurring sync
@@ -72,26 +82,28 @@ def api_freqs():
 @app.post("/refresh")
 def refresh():
     try:
+        log.info("Manual refresh: /refresh called from %s", request.remote_addr)
         result = sync_all()
+        log.info("Manual refresh: %s", result)
         return jsonify({"status": "ok", **result})
     except Exception as e:
+        log.exception("Manual refresh failed: %s", e)
         return jsonify({"status": "error", "error": str(e)}), 500
 
-# ---------- DEBUG endpoint ----------
+# Debug endpoint: quick probe of parsers
 @app.get("/debug/scrape")
 def debug_scrape():
-    """
-    /debug/scrape?year=2024  -> JSON {ok,count,sample}
-    /debug/scrape            -> JSON {ok,count,sample} from past-results
-    """
     try:
         year = request.args.get("year", type=int)
         if year:
+            log.info("Debug scrape (year=%s) requested", year)
             rows = fetch_year(year)
             return jsonify({"ok": True, "mode": "year", "year": year, "count": len(rows), "sample": rows[:3]})
+        log.info("Debug scrape (latest 6m) requested")
         rows = fetch_latest_six_months()
         return jsonify({"ok": True, "mode": "latest", "count": len(rows), "sample": rows[:3]})
     except Exception as e:
+        log.exception("Debug scrape failed: %s", e)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.get("/healthz")

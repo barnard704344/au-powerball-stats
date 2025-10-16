@@ -4,6 +4,9 @@ import time
 import json
 import datetime as dt
 from typing import List, Dict, Iterable, Optional, Tuple, Any
+import logging
+log = logging.getLogger("scraper")
+
 
 import requests
 from bs4 import BeautifulSoup
@@ -349,24 +352,44 @@ def _parse_html_page(html: str, source_url: str) -> List[Dict]:
     return uniq
 
 
-def _html_fetch_year(year: int) -> List[Dict]:
-    url = ARCHIVE_FMT.format(year=year)
-    html = _http_get(url, headers=API_HEADERS)
-    raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
-    print(f"[scraper] HTML GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
-    items = _parse_html_page(html, url)
-    print(f"[scraper] HTML parsed {url} -> rows={len(items)}")
-    return items
+def fetch_year(year: int) -> List[Dict]:
+    # Try JSON API first; fall back to HTML
+    try:
+        rows = _api_fetch_year(year)
+        if rows:
+            log.info("[API] year %s -> rows=%d", year, len(rows))
+            return rows
+        log.info("[API] year %s -> rows=0; falling back to HTML", year)
+    except Exception as e:
+        log.warning("[API] year %s error: %s; falling back to HTML", year, e)
+
+    try:
+        rows = _html_fetch_year(year)
+        log.info("[HTML] year %s -> rows=%d", year, len(rows))
+        return rows
+    except Exception as e:
+        log.error("[HTML] year %s error: %s", year, e)
+        return []
+
 
 
 def _html_fetch_latest_6m() -> List[Dict]:
-    url = PAST_RESULTS
-    html = _http_get(url, headers=API_HEADERS)
-    raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
-    print(f"[scraper] HTML GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
-    items = _parse_html_page(html, url)
-    print(f"[scraper] HTML parsed {url} -> rows={len(items)}")
-    return items
+     try:
+        rows = _api_fetch_latest_6m()
+        if rows:
+            log.info("[API] latest6m -> rows=%d", len(rows))
+            return rows
+        log.info("[API] latest6m -> rows=0; falling back to HTML")
+    except Exception as e:
+        log.warning("[API] latest6m error: %s; falling back to HTML", e)
+
+    try:
+        rows = _html_fetch_latest_6m()
+        log.info("[HTML] latest6m -> rows=%d", len(rows))
+        return rows
+    except Exception as e:
+        log.error("[HTML] latest6m error: %s", e)
+        return []
 
 
 # =============================================================================

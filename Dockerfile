@@ -19,14 +19,15 @@ COPY app /srv/app
 RUN mkdir -p /data
 VOLUME ["/data"]
 
-# Default env (can be overridden with .env / compose)
+# >>> REPLACE THIS WHOLE ENV BLOCK <<<
 ENV FLASK_HOST=0.0.0.0 \
     FLASK_PORT=8080 \
     UPDATE_CRON="*/15 * * * *" \
     YEARS_START=2018 \
     DB_PATH=/data/powerball.sqlite \
     TZ=Australia/Adelaide \
-    PYTHONPATH=/srv/app
+    PYTHONPATH=/srv/app \
+    GUNICORN_CMD_ARGS="--log-level info --access-logfile - --error-logfile 
 
 EXPOSE 8080
 
