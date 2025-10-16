@@ -212,14 +212,21 @@ def _parse_page(html: str, source_url: str) -> List[Dict]:
 def fetch_year(year: int) -> List[Dict]:
     url = ARCHIVE_FMT.format(year=year)
     html = _fetch_html(url)
+    # DEBUG: show page size and naive "Draw ####" occurrences before parsing
+    raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
+    print(f"[scraper] GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
     items = _parse_page(html, url)
-    print(f"[scraper] {url} -> {len(items)} rows")
+    print(f"[scraper] parsed {url} -> rows={len(items)}")
     return items
 
+
 def fetch_latest_six_months() -> List[Dict]:
-    html = _fetch_html(PAST_RESULTS)
-    items = _parse_page(html, PAST_RESULTS)
-    print(f"[scraper] {PAST_RESULTS} -> {len(items)} rows")
+    url = PAST_RESULTS
+    html = _fetch_html(url)
+    raw_matches = len(re.findall(r"\bDraw\s+\d+\b", html, flags=re.IGNORECASE))
+    print(f"[scraper] GET {url} -> html_len={len(html)} raw_draw_tokens={raw_matches}")
+    items = _parse_page(html, url)
+    print(f"[scraper] parsed {url} -> rows={len(items)}")
     return items
 
 def sync_all() -> Dict[str, int]:

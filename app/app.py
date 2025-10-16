@@ -15,11 +15,13 @@ from scraper import sync_all, fetch_year, fetch_latest_six_months
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
+# Initialize DB schema
 init_db()
 
 TZ = os.environ.get("TZ", "Australia/Adelaide")
 LOCAL_TZ = timezone(TZ)
 UPDATE_CRON = os.environ.get("UPDATE_CRON", "*/15 * * * *")
+
 scheduler = BackgroundScheduler(timezone=LOCAL_TZ)
 
 def job_sync():
@@ -45,9 +47,11 @@ def initial_sync_async():
             app.logger.exception(f"Initial sync failed: {e}")
     threading.Thread(target=_run, daemon=True).start()
 
+# Kick off initial sync and schedule recurring sync
 initial_sync_async()
 schedule_job()
 
+# ----------------------- Routes -----------------------
 @app.get("/")
 def index():
     window = request.args.get("window", type=int)
@@ -73,22 +77,22 @@ def refresh():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
+# ---------- NEW: Debug endpoint to inspect scraper output ----------
 @app.get("/debug/scrape")
 def debug_scrape():
     """
-    Quick diagnostics:
-      /debug/scrape?year=2024  -> returns parsed count & sample for that year
-      /debug/scrape            -> returns parsed count from 'past results'
+    /debug/scrape?year=2024  -> returns JSON with count & sample for that year
+    /debug/scrape            -> returns JSON with count & sample for 'past results'
     """
     try:
         year = request.args.get("year", type=int)
         if year:
             rows = fetch_year(year)
-        else:
-            rows = fetch_latest_six_months()
-        sample = rows[:3]
-        return jsonify({"ok": True, "count": len(rows), "sample": sample})
+            return jsonify({"ok": True, "mode": "year", "year": year, "count": len(rows), "sample": rows[:3]})
+        rows = fetch_latest_six_months()
+        return jsonify({"ok": True, "mode": "latest", "count": len(rows), "sample": rows[:3]})
     except Exception as e:
+        # Always return JSON so jq won't choke
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.get("/healthz")
