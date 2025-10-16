@@ -71,6 +71,71 @@ def compute_prediction(window: int = 100):
           3) If still tie: lowest numeric value
     Also returns full frequency tables and counts for transparency.
     """
+    freqs = get_frequencies(window=window)
+    main_freq = {int(k): int(v) for k, v in (freqs.get("main") or {}).items()}
+    pb_freq   = {int(k): int(v) for k, v in (freqs.get("powerball") or {}).items()}
+
+    def pick_top(freq_map: dict[int, int], look_at_powerball: bool = False):
+        if not freq_map:
+            return {"top_list": [], "chosen": None, "top_count": 0}
+        items = list(freq_map.items())
+        max_count = max(c for _, c in items)
+        top_list = sorted([n for n, c in items if c == max_count])
+
+        if len(top_list) == 1:
+            chosen = top_list[0]
+        else:
+            # Recency tiebreak — scan newest→oldest across last `window` draws
+            draws = get_draws(limit=window)
+            most_recent_rank = {}
+            for idx, d in enumerate(draws):
+                nums = d.get("nums") or []
+                pb = d.get("pb")
+                for n in top_list:
+                    hit = (n in nums) or (look_at_powerball and n == pb)
+                    if hit and n not in most_recent_rank:
+                        most_recent_rank[n] = idx
+                if len(most_recent_rank) == len(top_list):
+                    break
+            ranked = [(most_recent_rank.get(n, 10**9), n) for n in top_list]
+            ranked.sort(key=lambda t: (t[0], t[1]))  # more recent first, then lowest number
+            chosen = ranked[0][1]
+
+        return {"top_list": top_list, "chosen": chosen, "top_count": max_count}
+
+    main_pick = pick_top(main_freq, look_at_powerball=False)
+    pb_pick   = pick_top(pb_freq,   look_at_powerball=True)
+
+    return {
+        "window": window,
+        "main": {
+            "top_numbers": main_pick["top_list"],
+            "top_count": main_pick["top_count"],
+            "chosen_main": main_pick["chosen"],
+            "frequency_table": main_freq,
+        },
+        "powerball": {
+            "top_numbers": pb_pick["top_list"],
+            "top_count": pb_pick["top_count"],
+            "chosen_powerball": pb_pick["chosen"],
+            "frequency_table": pb_freq,
+        },
+        "note": "Descriptive stats over last N draws. Powerball draws are independent; this is not predictive.",
+    }
+
+
+def compute_prediction(window: int = 100):
+    """
+    Returns a 'prediction' based on simple frequencies over the last `window` draws:
+      - main_top_numbers: list of the most frequent main numbers (could be multiple on tie)
+      - powerball_top_numbers: list of the most frequent PB numbers (could be multiple on tie)
+      - chosen_main / chosen_powerball: single picks after deterministic tie-breaking
+        Tie-break rules:
+          1) Highest frequency
+          2) If tie: pick the number that appeared most recently (latest draw)
+          3) If still tie: lowest numeric value
+    Also returns full frequency tables and counts for transparency.
+    """
     # Frequency tables over the last N
     freqs = get_frequencies(window=window)
     main_freq = freqs.get("main", {}) or {}
@@ -212,6 +277,17 @@ def api_freqs():
 @app.get("/api/prediction")
 def api_prediction():
     """
+    /api/prediction?window=100
+    Returns top mains+PB over the last N with tie-break explanation.
+    """
+    window = request.args.get("window", default=100, type=int)
+    data = compute_prediction(window=window)
+    return jsonify(data)
+
+
+@app.get("/api/prediction")
+def api_prediction():
+    """
     Returns the most frequent main number(s) and powerball over the last N draws,
     with deterministic tie-breaking to pick a single suggested main and PB.
     Query: /api/prediction?window=100
@@ -219,6 +295,17 @@ def api_prediction():
     window = request.args.get("window", default=100, type=int)
     data = compute_prediction(window=window)
     return jsonify(data)
+
+@app.get("/prediction")
+def prediction_page():
+    """
+    HTML page: /prediction?window=100
+    Shows the most frequent main numbers & powerball over the last N draws,
+    with deterministic tie-breaking to select a single pick for each.
+    """
+    window = request.args.get("window", default=100, type=int)
+    data = compute_prediction(window=window)
+    return render_template("prediction.html", data=data)
 
 
 @app.get("/api/groups")

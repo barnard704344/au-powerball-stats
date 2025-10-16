@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Powerball — Prediction (Top Frequencies)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+      h1, h2 { margin: 0.2rem 0 0.6rem; }
+      .meta { color: #555; margin-bottom: 1rem; }
+      .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
+      .card { border: 1px solid #e5e5e5; border-radius: 10px; padding: 1rem; }
+      table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+      th, td { border: 1px solid #ddd; padding: 0.45rem 0.6rem; text-align: left; }
+      th { background: #f6f6f6; }
+      code { background: #f2f2f2; padding: 0 0.25rem; border-radius: 4px; }
+      .toolbar a { margin-right: 0.6rem; text-decoration: none; color: #0b63e5; }
+      .toolbar a:hover { text-decoration: underline; }
+      .small { font-size: 0.92rem; color: #666; }
+      .big { font-size: 1.5rem; font-weight: 700; }
+      .pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; background: #eef3ff; border: 1px solid #d7e3ff; }
+    </style>
+  </head>
+  <body>
+    <h1>“Prediction” — Top Frequencies</h1>
+    <div class="meta">
+      Window: <strong>{{ data.window }}</strong> draws ·
+      <a class="small" href="/?window={{ data.window }}">← Back to Recent</a> ·
+      <a class="small" href="/groups?window={{ data.window }}">View Groups</a>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <h2>Suggested Main</h2>
+        {% if data.main.chosen_main is not none %}
+          <div class="big pill"><code>{{ "%02d"|format(data.main.chosen_main) }}</code></div>
+          <div class="small">Chosen from top group via tiebreak (recency → lowest number)</div>
+          {% if data.main.top_numbers and (data.main.top_numbers|length) > 1 %}
+            <div class="small" style="margin-top:0.4rem;">
+              Tied top mains:
+              {% for n in data.main.top_numbers %}
+                <code>{{ "%02d"|format(n) }}</code>{% if not loop.last %} {% endif %}
+              {% endfor %}
+              (count={{ data.main.top_count }})
+            </div>
+          {% endif %}
+        {% else %}
+          <div class="small">No data available.</div>
+        {% endif %}
+        <details style="margin-top:0.6rem;">
+          <summary class="small">Main number frequency table (last {{ data.window }})</summary>
+          <table>
+            <thead><tr><th>Number</th><th>Count</th></tr></thead>
+            <tbody>
+              {% for n, c in (data.main.frequency_table|dictsort(by='key')) %}
+              <tr><td><code>{{ "%02d"|format(n) }}</code></td><td>{{ c }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      </div>
+
+      <div class="card">
+        <h2>Suggested Powerball</h2>
+        {% if data.powerball.chosen_powerball is not none %}
+          <div class="big pill"><code>{{ "%02d"|format(data.powerball.chosen_powerball) }}</code></div>
+          <div class="small">Chosen from top group via tiebreak (recency → lowest number)</div>
+          {% if data.powerball.top_numbers and (data.powerball.top_numbers|length) > 1 %}
+            <div class="small" style="margin-top:0.4rem;">
+              Tied top PBs:
+              {% for n in data.powerball.top_numbers %}
+                <code>{{ "%02d"|format(n) }}</code>{% if not loop.last %} {% endif %}
+              {% endfor %}
+              (count={{ data.powerball.top_count }})
+            </div>
+          {% endif %}
+        {% else %}
+          <div class="small">No data available.</div>
+        {% endif %}
+        <details style="margin-top:0.6rem;">
+          <summary class="small">Powerball frequency table (last {{ data.window }})</summary>
+          <table>
+            <thead><tr><th>PB</th><th>Count</th></tr></thead>
+            <tbody>
+              {% for n, c in (data.powerball.frequency_table|dictsort(by='key')) %}
+              <tr><td><code>{{ "%02d"|format(n) }}</code></td><td>{{ c }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </details>
+      </div>
+    </div>
+
+    <div class="small" style="margin-top:1rem;">
+      API: <code>/api/prediction?window=100</code> ·
+      Note: This is descriptive, not predictive; draws are independent.
+    </div>
+  </body>
+</html>
