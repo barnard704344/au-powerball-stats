@@ -20,7 +20,9 @@ ENV FLASK_HOST=0.0.0.0 \
     UPDATE_CRON="*/15 * * * *" \
     YEARS_START=2018 \
     DB_PATH=/data/powerball.sqlite \
-    TZ=Australia/Adelaide
+    TZ=Australia/Adelaide \
+    PYTHONPATH=/srv/app
+
 
 EXPOSE 8080
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "-w", "2", "--timeout", "120", "app:app"]
