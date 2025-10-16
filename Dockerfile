@@ -24,6 +24,7 @@ ENV FLASK_HOST=0.0.0.0 \
     PYTHONPATH=/srv/app
 
 
+
 EXPOSE 8080
 CMD ["gunicorn", "-b", "0.0.0.0:8080", "-w", "2", "--timeout", "120", "app:app"]
 
