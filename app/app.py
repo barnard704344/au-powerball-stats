@@ -6,20 +6,18 @@ from flask import Flask, jsonify, render_template, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
 
-# ---------- Logging config ----------
 logging.basicConfig(
     level=logging.INFO,
     format='[%(levelname)s] %(asctime)s %(name)s: %(message)s'
 )
 log = logging.getLogger("app")
 
-# Ensure local imports under gunicorn
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from db import init_db, get_draws, get_frequencies
-from scraper import sync_all, fetch_year, fetch_latest_six_months
+from db import init_db, get_draws, get_frequencies, upsert_draw  # upsert for /dev/seed
+from scraper import sync_all, fetch_year, fetch_latest_six_months, debug_probe
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -57,7 +55,6 @@ def initial_sync_async():
             log.exception("Initial sync failed: %s", e)
     threading.Thread(target=_run, daemon=True).start()
 
-# Kick off initial sync and schedule recurring sync
 initial_sync_async()
 schedule_job()
 
@@ -90,14 +87,11 @@ def refresh():
         log.exception("Manual refresh failed: %s", e)
         return jsonify({"status": "error", "error": str(e)}), 500
 
-# Debug endpoint: quick probe of parsers
 @app.get("/debug/scrape")
 def debug_scrape():
     try:
         year = request.args.get("year", type=int)
-        from scraper import debug_probe  # local import to avoid cycles
         diag = debug_probe(year=year)
-        # Also include the high-level count via the normal fetch paths
         if year:
             rows = fetch_year(year)
             return jsonify({"ok": True, "mode": "year", "count": len(rows), "sample": rows[:3], **diag})
@@ -106,6 +100,23 @@ def debug_scrape():
     except Exception as e:
         log.exception("Debug scrape failed: %s", e)
         return jsonify({"ok": False, "error": str(e)}), 500
+
+# Seed a few rows to validate DB->UI pipeline (protect with token if desired)
+@app.post("/dev/seed")
+def dev_seed():
+    token = os.environ.get("SEED_TOKEN")
+    supplied = request.headers.get("X-Seed-Token")
+    if token and token != supplied:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    # 3 realistic rows
+    samples = [
+        {"draw_no": 1410, "draw_date": "2024-01-04", "nums": [2, 9, 17, 23, 28, 31, 35], "pb": 10, "source_url": "seed"},
+        {"draw_no": 1411, "draw_date": "2024-01-11", "nums": [1, 7, 12, 19, 21, 27, 33], "pb": 5, "source_url": "seed"},
+        {"draw_no": 1412, "draw_date": "2024-01-18", "nums": [3, 6, 14, 20, 22, 30, 34], "pb": 12, "source_url": "seed"},
+    ]
+    for s in samples:
+        upsert_draw(s)
+    return jsonify({"ok": True, "seeded": len(samples)})
 
 @app.get("/healthz")
 def healthz():
